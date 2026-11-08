@@ -1,0 +1,616 @@
+// ═══════════════════════════════════════════════════════════════
+// gestion-servicios-web-ts
+// Schema Prisma 7 — Motor: MySQL 8.4 InnoDB · Charset: utf8mb4
+// La URL de conexión vive en prisma.config.ts (no aquí)
+// ═══════════════════════════════════════════════════════════════
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "mysql"
+}
+
+// ═══════════════════════════════════════════════════════════════
+// ENUMS
+// ═══════════════════════════════════════════════════════════════
+
+enum AccionAuditoria {
+  CREATE
+  UPDATE
+  DELETE
+  LOGIN
+  LOGOUT
+}
+
+// ─── Diagnóstico técnico (N:1 con la orden — varios por orden) ───
+model Diagnostico {
+  id                 String            @id @default(cuid())
+  tenantId           String            @map("tenant_id")
+  ordenId            String            @map("orden_id")
+  tecnicoId          String            @map("tecnico_id")
+  estado             EstadoDiagnostico @default(BORRADOR)
+  pruebasRealizadas  String?           @map("pruebas_realizadas") @db.Text
+  voltajesMedidos    String?           @map("voltajes_medidos") @db.Text
+  componentesDanados String?           @map("componentes_danados") @db.Text
+  observaciones      String?           @db.Text
+  conclusion         String?           @db.Text
+  fechaInicio        DateTime?         @map("fecha_inicio")
+  fechaFin           DateTime?         @map("fecha_fin")
+  createdAt          DateTime          @default(now()) @map("created_at")
+  updatedAt          DateTime          @updatedAt @map("updated_at")
+
+  tenant     Tenant                 @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  orden      OrdenServicio          @relation(fields: [ordenId], references: [id], onDelete: Cascade)
+  tecnico    Usuario                @relation("DiagnosticoTecnico", fields: [tecnicoId], references: [id])
+  evidencias DiagnosticoEvidencia[]
+  cotizaciones Cotizacion[]
+
+  @@index([tenantId, ordenId])
+  @@index([tenantId, tecnicoId, estado])
+  @@map("diagnosticos")
+}
+
+// ─── Evidencias del diagnóstico (fotos/videos por URL) ───
+model DiagnosticoEvidencia {
+  id            String        @id @default(cuid())
+  tenantId      String        @map("tenant_id")
+  diagnosticoId String        @map("diagnostico_id")
+  tipo          TipoEvidencia @default(FOTO)
+  url           String        @db.VarChar(1000)
+  descripcion   String?       @db.VarChar(255)
+  createdAt     DateTime      @default(now()) @map("created_at")
+
+  tenant      Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  diagnostico Diagnostico @relation(fields: [diagnosticoId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, diagnosticoId])
+  @@map("diagnostico_evidencias")
+}
+
+// ═══════════════════════════════════════════════════════════════
+// TENANT
+// ═══════════════════════════════════════════════════════════════
+
+model Tenant {
+  id        String   @id @default(cuid())
+  slug      String   @unique @db.VarChar(64)
+  nombre    String   @db.VarChar(255)
+  activo    Boolean  @default(true)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  usuarios      Usuario[]
+  roles         Rol[]
+  sesiones      SesionLogin[]
+  configuracion ConfiguracionTenant[]
+  bitacora      BitacoraAuditoria[]
+
+  // 👇 NUEVO — Módulo Clientes y CRM
+  categoriasEquipo   CatCategoriaEquipo[]
+  marcas             CatMarca[]
+  clientes           Cliente[]
+  clienteDirecciones ClienteDireccion[]
+  clienteEquipos     ClienteEquipo[]
+  tiposServicio      CatTipoServicio[]
+
+  ordenesServicio        OrdenServicio[]
+  ordenEstadoHistorial   OrdenEstadoHistorial[]
+  ordenChecklistEstetico OrdenChecklistEstetico[]
+  ordenAccesorios        OrdenAccesorio[]
+
+  diagnosticos          Diagnostico[]
+  diagnosticoEvidencias DiagnosticoEvidencia[]
+  cotizaciones   Cotizacion[]
+  cotizacionItems CotizacionItem[]
+
+  @@map("tenants")
+}
+
+// ═══════════════════════════════════════════════════════════════
+// IDENTIDAD
+// ═══════════════════════════════════════════════════════════════
+
+model Usuario {
+  id           String    @id @default(cuid())
+  tenantId     String    @map("tenant_id")
+  email        String    @db.VarChar(255)
+  passwordHash String    @map("password_hash") @db.VarChar(255)
+  nombre       String    @db.VarChar(120)
+  apellidos    String?   @db.VarChar(120)
+  telefono     String?   @db.VarChar(32)
+  activo       Boolean   @default(true)
+  ultimoLogin  DateTime? @map("ultimo_login")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  tenant   Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  roles    UsuarioRol[]
+  sesiones SesionLogin[]
+  bitacora BitacoraAuditoria[]
+
+  ordenesAsignadas    OrdenServicio[]        @relation("OrdenTecnico")
+  ordenHistorial      OrdenEstadoHistorial[] @relation("OrdenHistorialUsuario")
+  diagnosticosTecnico Diagnostico[]          @relation("DiagnosticoTecnico")
+
+  @@unique([tenantId, email])
+  @@index([tenantId])
+  @@map("usuarios")
+}
+
+model Rol {
+  id          String   @id @default(cuid())
+  tenantId    String   @map("tenant_id")
+  nombre      String   @db.VarChar(64)
+  descripcion String?  @db.VarChar(255)
+  esSistema   Boolean  @default(false) @map("es_sistema")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  tenant   Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  permisos RolPermiso[]
+  usuarios UsuarioRol[]
+
+  @@unique([tenantId, nombre])
+  @@index([tenantId])
+  @@map("roles")
+}
+
+model Permiso {
+  id          String @id @default(cuid())
+  codigo      String @unique @db.VarChar(100)
+  modulo      String @db.VarChar(64)
+  descripcion String @db.VarChar(255)
+
+  roles RolPermiso[]
+
+  @@index([modulo])
+  @@map("permisos")
+}
+
+model RolPermiso {
+  rolId     String @map("rol_id")
+  permisoId String @map("permiso_id")
+
+  rol     Rol     @relation(fields: [rolId], references: [id], onDelete: Cascade)
+  permiso Permiso @relation(fields: [permisoId], references: [id], onDelete: Cascade)
+
+  @@id([rolId, permisoId])
+  @@map("rol_permisos")
+}
+
+model UsuarioRol {
+  usuarioId  String   @map("usuario_id")
+  rolId      String   @map("rol_id")
+  asignadoEn DateTime @default(now()) @map("asignado_en")
+
+  usuario Usuario @relation(fields: [usuarioId], references: [id], onDelete: Cascade)
+  rol     Rol     @relation(fields: [rolId], references: [id], onDelete: Cascade)
+
+  @@id([usuarioId, rolId])
+  @@map("usuario_roles")
+}
+
+// ═══════════════════════════════════════════════════════════════
+// SESIONES Y CONFIGURACIÓN
+// ═══════════════════════════════════════════════════════════════
+
+model SesionLogin {
+  id        String   @id @default(cuid())
+  tenantId  String   @map("tenant_id")
+  usuarioId String   @map("usuario_id")
+  ip        String?  @db.VarChar(45)
+  userAgent String?  @map("user_agent") @db.VarChar(512)
+  exito     Boolean  @default(true)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  tenant  Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  usuario Usuario @relation(fields: [usuarioId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, createdAt])
+  @@index([usuarioId, createdAt])
+  @@map("sesiones_login")
+}
+
+model ConfiguracionTenant {
+  id        String   @id @default(cuid())
+  tenantId  String   @map("tenant_id")
+  clave     String   @db.VarChar(100)
+  valor     String   @db.Text
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, clave])
+  @@map("configuracion_tenant")
+}
+
+// ═══════════════════════════════════════════════════════════════
+// AUDITORÍA
+// ═══════════════════════════════════════════════════════════════
+
+model BitacoraAuditoria {
+  id              BigInt          @id @default(autoincrement())
+  tenantId        String          @map("tenant_id")
+  usuarioId       String?         @map("usuario_id")
+  modulo          String          @db.VarChar(64)
+  accion          AccionAuditoria
+  tablaAfectada   String          @map("tabla_afectada") @db.VarChar(64)
+  registroId      String          @map("registro_id") @db.VarChar(64)
+  datosAnteriores Json?           @map("datos_anteriores")
+  datosNuevos     Json?           @map("datos_nuevos")
+  ipOrigen        String?         @map("ip_origen") @db.VarChar(45)
+  userAgent       String?         @map("user_agent") @db.VarChar(512)
+  createdAt       DateTime        @default(now()) @map("created_at")
+
+  tenant  Tenant   @relation(fields: [tenantId], references: [id])
+  usuario Usuario? @relation(fields: [usuarioId], references: [id])
+
+  @@index([tenantId, tablaAfectada, registroId])
+  @@index([tenantId, createdAt])
+  @@index([tenantId, usuarioId, createdAt])
+  @@map("bitacora_auditoria")
+}
+
+// ═══════════════════════════════════════════════════════════════
+// MÓDULO: CLIENTES Y CRM
+// ═══════════════════════════════════════════════════════════════
+
+enum TipoCliente {
+  FISICA
+  JURIDICA
+}
+
+// ─── Catálogo: Categorías de equipo ───
+model CatCategoriaEquipo {
+  id          String   @id @default(cuid())
+  tenantId    String   @map("tenant_id")
+  nombre      String   @db.VarChar(80)
+  descripcion String?  @db.VarChar(255)
+  esSistema   Boolean  @default(false) @map("es_sistema")
+  activo      Boolean  @default(true)
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  tenant  Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  equipos ClienteEquipo[]
+
+  @@unique([tenantId, nombre])
+  @@index([tenantId, activo])
+  @@map("cat_categorias_equipo")
+}
+
+// ─── Catálogo: Marcas ───
+model CatMarca {
+  id        String   @id @default(cuid())
+  tenantId  String   @map("tenant_id")
+  nombre    String   @db.VarChar(80)
+  activo    Boolean  @default(true)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant  Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  equipos ClienteEquipo[]
+
+  @@unique([tenantId, nombre])
+  @@index([tenantId, activo])
+  @@map("cat_marcas")
+}
+
+// ─── Clientes ───
+model Cliente {
+  id                  String      @id @default(cuid())
+  tenantId            String      @map("tenant_id")
+  tipo                TipoCliente @default(FISICA)
+  rfc                 String?     @db.VarChar(20)
+  razonSocial         String?     @map("razon_social") @db.VarChar(200)
+  nombre              String      @db.VarChar(120)
+  apellidos           String?     @db.VarChar(120)
+  email               String?     @db.VarChar(255)
+  telefono            String      @db.VarChar(32)
+  telefonoAlternativo String?     @map("telefono_alternativo") @db.VarChar(32)
+  fechaNacimiento     DateTime?   @map("fecha_nacimiento") @db.Date
+  notas               String?     @db.Text
+  activo              Boolean     @default(true)
+  createdAt           DateTime    @default(now()) @map("created_at")
+  updatedAt           DateTime    @updatedAt @map("updated_at")
+  deletedAt           DateTime?   @map("deleted_at")
+
+  tenant      Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  direcciones ClienteDireccion[]
+  equipos     ClienteEquipo[]
+
+  ordenes OrdenServicio[]
+
+  @@unique([tenantId, rfc])
+  @@unique([tenantId, email])
+  @@index([tenantId, activo, deletedAt])
+  @@index([tenantId, telefono])
+  @@index([tenantId, nombre, apellidos])
+  @@map("clientes")
+}
+
+// ─── Direcciones del cliente ───
+model ClienteDireccion {
+  id           String   @id @default(cuid())
+  tenantId     String   @map("tenant_id")
+  clienteId    String   @map("cliente_id")
+  etiqueta     String   @db.VarChar(50)
+  calle        String   @db.VarChar(255)
+  ciudad       String   @db.VarChar(100)
+  departamento String?  @db.VarChar(100)
+  pais         String   @default("NI") @db.Char(2)
+  codigoPostal String?  @map("codigo_postal") @db.VarChar(20)
+  referencias  String?  @db.Text
+  latitud      Float?
+  longitud     Float?
+  esPrincipal  Boolean  @default(false) @map("es_principal")
+  activo       Boolean  @default(true)
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  tenant         Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  cliente        Cliente         @relation(fields: [clienteId], references: [id], onDelete: Cascade)
+  ordenServicios OrdenServicio[]
+
+  @@index([tenantId, clienteId, activo])
+  @@map("cliente_direcciones")
+}
+
+// ─── Equipos del cliente ───
+model ClienteEquipo {
+  id               String    @id @default(cuid())
+  tenantId         String    @map("tenant_id")
+  clienteId        String    @map("cliente_id")
+  categoriaId      String?   @map("categoria_id")
+  marcaId          String?   @map("marca_id")
+  modelo           String?   @db.VarChar(120)
+  numeroSerie      String?   @map("numero_serie") @db.VarChar(80)
+  descripcion      String?   @db.Text
+  fechaAdquisicion DateTime? @map("fecha_adquisicion") @db.Date
+  observaciones    String?   @db.Text
+  activo           Boolean   @default(true)
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+
+  tenant    Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  cliente   Cliente             @relation(fields: [clienteId], references: [id], onDelete: Cascade)
+  categoria CatCategoriaEquipo? @relation(fields: [categoriaId], references: [id], onDelete: SetNull)
+  marca     CatMarca?           @relation(fields: [marcaId], references: [id], onDelete: SetNull)
+  ordenes   OrdenServicio[]
+
+  @@unique([tenantId, numeroSerie])
+  @@index([tenantId, clienteId, activo])
+  @@map("cliente_equipos")
+}
+
+model CatTipoServicio {
+  id          String   @id @default(cuid())
+  tenantId    String   @map("tenant_id")
+  nombre      String   @db.VarChar(80)
+  descripcion String?  @db.VarChar(255)
+  esSistema   Boolean  @default(false) @map("es_sistema")
+  activo      Boolean  @default(true)
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  tenant  Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  ordenes OrdenServicio[]
+
+  @@unique([tenantId, nombre])
+  @@index([tenantId, activo])
+  @@map("cat_tipos_servicio")
+}
+
+// ═══════════════════════════════════════════════════════════════
+// MÓDULO: ÓRDENES DE SERVICIO
+// ═══════════════════════════════════════════════════════════════
+
+enum EstadoOrden {
+  BORRADOR
+  RECIBIDO
+  EN_DIAGNOSTICO
+  PRESUPUESTADO
+  APROBADO
+  REPARANDO
+  LISTO
+  ENTREGADO
+  CANCELADO
+}
+
+enum ModalidadOrden {
+  TALLER
+  DOMICILIO
+}
+
+enum PrioridadOrden {
+  BAJA
+  MEDIA
+  ALTA
+  URGENTE
+}
+
+// ─── Orden de Servicio ───
+model OrdenServicio {
+  id                String         @id @default(cuid())
+  tenantId          String         @map("tenant_id")
+  folio             String         @db.VarChar(30)
+  clienteId         String         @map("cliente_id")
+  equipoId          String         @map("equipo_id")
+  tipoServicioId    String?        @map("tipo_servicio_id")
+  direccionId       String?        @map("direccion_id")
+  tecnicoAsignadoId String?        @map("tecnico_asignado_id")
+  modalidad         ModalidadOrden @default(TALLER)
+  estado            EstadoOrden    @default(BORRADOR)
+  prioridad         PrioridadOrden @default(MEDIA)
+  fallaReportada    String?        @map("falla_reportada") @db.Text
+  observaciones     String?        @db.Text
+  fechaRecepcion    DateTime?      @map("fecha_recepcion")
+  fechaCompromiso   DateTime?      @map("fecha_compromiso")
+  fechaEntrega      DateTime?      @map("fecha_entrega")
+  createdAt         DateTime       @default(now()) @map("created_at")
+  updatedAt         DateTime       @updatedAt @map("updated_at")
+
+  tenant            Tenant                  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  cliente           Cliente                 @relation(fields: [clienteId], references: [id])
+  equipo            ClienteEquipo           @relation(fields: [equipoId], references: [id])
+  tipoServicio      CatTipoServicio?        @relation(fields: [tipoServicioId], references: [id], onDelete: SetNull)
+  direccion         ClienteDireccion?       @relation(fields: [direccionId], references: [id], onDelete: SetNull)
+  tecnicoAsignado   Usuario?                @relation("OrdenTecnico", fields: [tecnicoAsignadoId], references: [id], onDelete: SetNull)
+  historialEstados  OrdenEstadoHistorial[]
+  checklistEstetico OrdenChecklistEstetico?
+  accesorios        OrdenAccesorio[]
+
+  diagnosticos Diagnostico[]
+  cotizaciones Cotizacion[]
+
+  @@unique([tenantId, folio])
+  @@index([tenantId, estado, createdAt])
+  @@index([tenantId, clienteId])
+  @@index([tenantId, equipoId])
+  @@index([tenantId, tecnicoAsignadoId])
+  @@map("ordenes_servicio")
+}
+
+// ─── Historial de estados ───
+model OrdenEstadoHistorial {
+  id             String       @id @default(cuid())
+  tenantId       String       @map("tenant_id")
+  ordenId        String       @map("orden_id")
+  estadoAnterior EstadoOrden? @map("estado_anterior")
+  estadoNuevo    EstadoOrden  @map("estado_nuevo")
+  comentario     String?      @db.Text
+  usuarioId      String?      @map("usuario_id")
+  createdAt      DateTime     @default(now()) @map("created_at")
+
+  tenant  Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  orden   OrdenServicio @relation(fields: [ordenId], references: [id], onDelete: Cascade)
+  usuario Usuario?      @relation("OrdenHistorialUsuario", fields: [usuarioId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId, ordenId, createdAt])
+  @@map("orden_estado_historial")
+}
+
+// ─── Checklist estético (1:1 con la orden) ───
+model OrdenChecklistEstetico {
+  id              String   @id @default(cuid())
+  tenantId        String   @map("tenant_id")
+  ordenId         String   @unique @map("orden_id")
+  golpes          Boolean  @default(false)
+  rayones         Boolean  @default(false)
+  pantallaRota    Boolean  @default(false) @map("pantalla_rota")
+  carcasaDanada   Boolean  @default(false) @map("carcasa_danada")
+  humedad         Boolean  @default(false)
+  faltanTornillos Boolean  @default(false) @map("faltan_tornillos")
+  notas           String?  @db.Text
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  orden  OrdenServicio @relation(fields: [ordenId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@map("orden_checklist_estetico")
+}
+
+// ─── Accesorios recibidos (N:1 con la orden) ───
+model OrdenAccesorio {
+  id        String   @id @default(cuid())
+  tenantId  String   @map("tenant_id")
+  ordenId   String   @map("orden_id")
+  nombre    String   @db.VarChar(100)
+  recibido  Boolean  @default(true)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  tenant Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  orden  OrdenServicio @relation(fields: [ordenId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, ordenId])
+  @@map("orden_accesorios")
+}
+
+// ═══════════════════════════════════════════════════════════════
+// MÓDULO: DIAGNÓSTICO TÉCNICO
+// ═══════════════════════════════════════════════════════════════
+
+enum EstadoDiagnostico {
+  BORRADOR
+  EN_PROCESO
+  COMPLETADO
+}
+
+enum TipoEvidencia {
+  FOTO
+  VIDEO
+  DOCUMENTO
+}
+
+// ═══════════════════════════════════════════════════════════════
+// MÓDULO: COTIZACIONES / PRESUPUESTOS
+// ═══════════════════════════════════════════════════════════════
+
+enum EstadoCotizacion {
+  BORRADOR
+  ENVIADA
+  APROBADA
+  RECHAZADA
+  VENCIDA
+}
+
+// ─── Cotización (N:1 con la orden — varias por orden, histórico) ───
+model Cotizacion {
+  id            String           @id @default(cuid())
+  tenantId      String           @map("tenant_id")
+  ordenId       String           @map("orden_id")
+  diagnosticoId String?          @map("diagnostico_id")
+  estado        EstadoCotizacion @default(BORRADOR)
+
+  subtotal Decimal @db.Decimal(12, 2)
+  iva      Decimal @db.Decimal(12, 2)
+  total    Decimal @db.Decimal(12, 2)
+  moneda   String  @default("NIO") @db.VarChar(3)
+
+  notas       String?   @db.Text
+  validaHasta DateTime? @map("valida_hasta")
+
+  enviadaEn    DateTime? @map("enviada_en")
+  respondidaEn DateTime? @map("respondida_en")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant      Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  orden       OrdenServicio @relation(fields: [ordenId], references: [id], onDelete: Cascade)
+  diagnostico Diagnostico?  @relation(fields: [diagnosticoId], references: [id], onDelete: SetNull)
+  items       CotizacionItem[]
+
+  @@index([tenantId, ordenId, createdAt])
+  @@index([tenantId, estado])
+  @@map("cotizaciones")
+}
+
+// ─── Items de la cotización (N:1) ───
+model CotizacionItem {
+  id           String @id @default(cuid())
+  tenantId     String @map("tenant_id")
+  cotizacionId String @map("cotizacion_id")
+
+  concepto       String  @db.VarChar(255)
+  descripcion    String? @db.Text
+  cantidad       Decimal @db.Decimal(10, 3)
+  precioUnitario Decimal @map("precio_unitario") @db.Decimal(12, 2)
+  subtotal       Decimal @db.Decimal(12, 2)
+  orden          Int     @default(0)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant     Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  cotizacion Cotizacion @relation(fields: [cotizacionId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, cotizacionId])
+  @@map("cotizacion_items")
+}
+
+

@@ -1,0 +1,786 @@
+
+
+=== src\shared\validation\validated-action.ts ===
+import type { z } from 'zod';
+
+import type { Prisma } from '@/generated/prisma/client';
+import { registrarAuditoria, registrarAuditoriaTx } from '@/shared/audit';
+import { getSession } from '@/shared/auth/session';
+import type { SessionUser } from '@/shared/auth/types';
+import { withTransaction } from '@/shared/db/transaction';
+import { ERROR_CODES } from '@/shared/errors/codes';
+import { type ErrorContext, handleError } from '@/shared/errors/handler';
+import { fail, ok, type Result } from '@/shared/errors/result';
+import { runWithTenant } from '@/shared/tenant/context';
+
+import type { ActionContext, ValidatedActionConfig } from './types';
+
+type ActionHandler<TSchema extends z.ZodTypeAny, TOut> = (
+  input: z.infer<TSchema>,
+  ctx: ActionContext,
+) => Promise<TOut>;
+
+/**
+ * Envuelve una Server Action aplicando, en orden:
+ *   1. Validación Zod del input
+ *   2. Autenticación (getSession)
+ *   3. Autorización (permission y/o roles)
+ *   4. Aislamiento multi-tenant (runWithTenant)
+ *   5. Transacción ACID (si transactional: true)
+ *   6. Auditoría (si config.audit)
+ *   7. Manejo centralizado de errores → Result<T>
+ *
+ * NUNCA lanza. Siempre devuelve Result<T>.
+ */
+export function validatedAction<TSchema extends z.ZodTypeAny, TOut>(
+  config: ValidatedActionConfig<TSchema, TOut>,
+  handler: ActionHandler<TSchema, TOut>,
+): (rawInput: unknown) => Promise<Result<TOut>> {
+  const errorCtx: ErrorContext = { modulo: config.modulo, accion: config.accion };
+
+  return async (rawInput: unknown): Promise<Result<TOut>> => {
+    // ─── 1. Validación Zod ───
+    const parsed = config.schema.safeParse(rawInput);
+    if (!parsed.success) {
+      return handleError(parsed.error, errorCtx);
+    }
+    const input = parsed.data;
+
+    // ─── 2. Autenticación ───
+    let user: SessionUser | null = null;
+    try {
+      user = await getSession();
+    } catch (err) {
+      return handleError(err, errorCtx);
+    }
+    if (!user) {
+      return fail(
+        ERROR_CODES.UNAUTHENTICATED,
+        `[${config.modulo}:${config.accion}] Debes iniciar sesión para continuar`,
+      );
+    }
+
+    // ─── 3. Autorización ───
+    if (config.permission && !user.permisos.includes(config.permission)) {
+      return fail(
+        ERROR_CODES.FORBIDDEN,
+        `[${config.modulo}:${config.accion}] Falta el permiso requerido: ${config.permission}`,
+      );
+    }
+    if (config.roles && !config.roles.some((r) => user.roles.includes(r))) {
+      return fail(
+        ERROR_CODES.FORBIDDEN,
+        `[${config.modulo}:${config.accion}] Se requiere uno de los roles: ${config.roles.join(', ')}`,
+      );
+    }
+
+    // ─── 4. Ejecución dentro del contexto del tenant ───
+    const effectiveUser = user;
+    return runWithTenant(
+      { tenantId: effectiveUser.tenantId, usuarioId: effectiveUser.id },
+      async (): Promise<Result<TOut>> => {
+        try {
+          if (config.transactional) {
+            return await runTransactional(config, handler, input, effectiveUser);
+          }
+          return await runStandalone(config, handler, input, effectiveUser);
+        } catch (err) {
+          return handleError(err, {
+            ...errorCtx,
+            usuarioId: effectiveUser.id,
+            tenantId: effectiveUser.tenantId,
+          });
+        }
+      },
+    );
+  };
+}
+
+/**
+ * Ejecuta handler + auditoría dentro de una única transacción ACID.
+ */
+async function runTransactional<TSchema extends z.ZodTypeAny, TOut>(
+  config: ValidatedActionConfig<TSchema, TOut>,
+  handler: ActionHandler<TSchema, TOut>,
+  input: z.infer<TSchema>,
+  user: SessionUser,
+): Promise<Result<TOut>> {
+  return withTransaction(async (tx) => {
+    const ctx: ActionContext = {
+      user,
+      tenantId: user.tenantId,
+      tx,
+    };
+
+    const out = await handler(input, ctx);
+
+    // Auditoría DENTRO de la transacción → si falla, rollback completo.
+    if (config.audit) {
+      const datosAnteriores = config.audit.datosAnteriores
+        ? await config.audit.datosAnteriores(input, { tx })
+        : null;
+      const datosNuevos = config.audit.datosNuevos ? config.audit.datosNuevos(out) : null;
+
+      await registrarAuditoriaTx(tx, {
+        modulo: config.modulo,
+        accion: config.audit.accionAuditoria,
+        tablaAfectada: config.audit.tablaAfectada,
+        registroId: config.audit.registroId(out),
+        datosAnteriores,
+        datosNuevos,
+      });
+    }
+
+    return out;
+  }).then(
+    (data) => ok(data),
+    (err) =>
+      handleError(err, {
+        modulo: config.modulo,
+        accion: config.accion,
+        usuarioId: user.id,
+        tenantId: user.tenantId,
+      }),
+  );
+}
+
+/**
+ * Ejecuta handler + auditoría sin transacción.
+ */
+async function runStandalone<TSchema extends z.ZodTypeAny, TOut>(
+  config: ValidatedActionConfig<TSchema, TOut>,
+  handler: ActionHandler<TSchema, TOut>,
+  input: z.infer<TSchema>,
+  user: SessionUser,
+): Promise<Result<TOut>> {
+  const ctx: ActionContext = {
+    user,
+    tenantId: user.tenantId,
+    tx: null,
+  };
+
+  const out = await handler(input, ctx);
+
+  if (config.audit) {
+    const datosAnteriores = config.audit.datosAnteriores
+      ? await config.audit.datosAnteriores(input, undefined)
+      : null;
+    const datosNuevos = config.audit.datosNuevos ? config.audit.datosNuevos(out) : null;
+
+    await registrarAuditoria({
+      modulo: config.modulo,
+      accion: config.audit.accionAuditoria,
+      tablaAfectada: config.audit.tablaAfectada,
+      registroId: config.audit.registroId(out),
+      datosAnteriores,
+      datosNuevos,
+    });
+  }
+
+  return ok(out);
+}
+
+export type { Prisma };
+
+
+=== src\shared\errors\result.ts ===
+import type { ErrorCode } from './codes';
+
+/**
+ * Tipo Result<T>: representa el resultado de una operación que puede fallar.
+ * Reemplaza el uso de excepciones en Server Actions.
+ *
+ * Uso:
+ *   const result = await algunaAction(input);
+ *   if (!result.success) {
+ *     console.error(result.code, result.error);
+ *     return;
+ *   }
+ *   console.log(result.data); // tipado como T
+ */
+export type Result<T> =
+  | { success: true; data: T }
+  | { success: false; error: string; code: ErrorCode; details?: unknown };
+
+/** Crea un resultado exitoso. */
+export function ok<T>(data: T): Result<T> {
+  return { success: true, data };
+}
+
+/** Crea un resultado fallido. */
+export function fail(code: ErrorCode, error: string, details?: unknown): Result<never> {
+  return { success: false, code, error, details };
+}
+
+/** Type guard: comprueba si un Result es exitoso. */
+export function isOk<T>(result: Result<T>): result is { success: true; data: T } {
+  return result.success;
+}
+
+/** Type guard: comprueba si un Result es fallido. */
+export function isFail<T>(
+  result: Result<T>,
+): result is { success: false; error: string; code: ErrorCode; details?: unknown } {
+  return !result.success;
+}
+
+
+=== src\modules\diagnosticos\services\diagnostico.service.ts ===
+import type { Prisma } from '@/generated/prisma/client';
+import { prisma } from '@/shared/db/client';
+import { BusinessRuleError, ConflictError, NotFoundError } from '@/shared/errors';
+import { requireCurrentTenantId } from '@/shared/tenant/context';
+
+import type {
+  CompletarDiagnosticoInput,
+  CrearDiagnosticoInput,
+  EditarDiagnosticoInput,
+} from '../schemas';
+import type { DiagnosticoConRelaciones } from '../types';
+
+interface Ctx {
+  tx?: Prisma.TransactionClient;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// CREAR
+// ═══════════════════════════════════════════════════════════════
+
+export async function crearDiagnostico(
+  input: CrearDiagnosticoInput,
+  usuarioId: string,
+  ctx: Ctx = {},
+) {
+  const client = ctx.tx ?? prisma;
+  const tenantId = requireCurrentTenantId();
+
+  // Verificar que la orden existe y está en estado válido
+  const orden = await client.ordenServicio.findFirst({
+    where: { id: input.ordenId },
+    select: { id: true, estado: true },
+  });
+  if (!orden) {
+    throw new NotFoundError('Orden no encontrada');
+  }
+
+  const estadosPermitidos = ['RECIBIDO', 'EN_DIAGNOSTICO'];
+  if (!estadosPermitidos.includes(orden.estado)) {
+    throw new BusinessRuleError(
+      `No se puede crear un diagnóstico en una orden en estado "${orden.estado}"`,
+    );
+  }
+
+  // Verificar que no exista un diagnóstico activo (BORRADOR o EN_PROCESO)
+  const activo = await client.diagnostico.findFirst({
+    where: {
+      ordenId: input.ordenId,
+      estado: { in: ['BORRADOR', 'EN_PROCESO'] },
+    },
+    select: { id: true },
+  });
+  if (activo) {
+    throw new ConflictError('Ya existe un diagnóstico activo para esta orden');
+  }
+
+  const data: Prisma.DiagnosticoUncheckedCreateInput = {
+    tenantId,
+    ordenId: input.ordenId,
+    tecnicoId: usuarioId,
+    estado: 'EN_PROCESO',
+    pruebasRealizadas: input.pruebasRealizadas ?? null,
+    voltajesMedidos: input.voltajesMedidos ?? null,
+    componentesDanados: input.componentesDanados ?? null,
+    observaciones: input.observaciones ?? null,
+    fechaInicio: new Date(),
+  };
+
+  return client.diagnostico.create({ data });
+}
+
+// ═══════════════════════════════════════════════════════════════
+// EDITAR
+// ═══════════════════════════════════════════════════════════════
+
+export async function editarDiagnostico(input: EditarDiagnosticoInput, ctx: Ctx = {}) {
+  const client = ctx.tx ?? prisma;
+
+  const actual = await client.diagnostico.findFirst({
+    where: { id: input.id },
+    select: { id: true, estado: true },
+  });
+  if (!actual) {
+    throw new NotFoundError('Diagnóstico no encontrado');
+  }
+
+  if (actual.estado === 'COMPLETADO') {
+    throw new BusinessRuleError('No se puede editar un diagnóstico completado');
+  }
+
+  const data: Prisma.DiagnosticoUncheckedUpdateInput = {};
+  if (input.pruebasRealizadas !== undefined) {
+    data.pruebasRealizadas = input.pruebasRealizadas ?? null;
+  }
+  if (input.voltajesMedidos !== undefined) {
+    data.voltajesMedidos = input.voltajesMedidos ?? null;
+  }
+  if (input.componentesDanados !== undefined) {
+    data.componentesDanados = input.componentesDanados ?? null;
+  }
+  if (input.observaciones !== undefined) {
+    data.observaciones = input.observaciones ?? null;
+  }
+  if (input.conclusion !== undefined) {
+    data.conclusion = input.conclusion ?? null;
+  }
+
+  return client.diagnostico.update({
+    where: { id: input.id },
+    data,
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════
+// COMPLETAR (bloquea edición futura)
+// ═══════════════════════════════════════════════════════════════
+
+export async function completarDiagnostico(input: CompletarDiagnosticoInput, ctx: Ctx = {}) {
+  const client = ctx.tx ?? prisma;
+
+  const actual = await client.diagnostico.findFirst({
+    where: { id: input.id },
+    select: { id: true, estado: true },
+  });
+  if (!actual) {
+    throw new NotFoundError('Diagnóstico no encontrado');
+  }
+
+  if (actual.estado === 'COMPLETADO') {
+    throw new BusinessRuleError('El diagnóstico ya está completado');
+  }
+
+  return client.diagnostico.update({
+    where: { id: input.id },
+    data: {
+      estado: 'COMPLETADO',
+      conclusion: input.conclusion,
+      fechaFin: new Date(),
+    },
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════
+// OBTENER UNO
+// ═══════════════════════════════════════════════════════════════
+
+export async function obtenerDiagnostico(id: string): Promise<DiagnosticoConRelaciones | null> {
+  const diag = await prisma.diagnostico.findFirst({
+    where: { id },
+    include: {
+      tecnico: { select: { id: true, nombre: true, apellidos: true } },
+      evidencias: { orderBy: { createdAt: 'desc' } },
+    },
+  });
+
+  return diag as DiagnosticoConRelaciones | null;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// LISTAR POR ORDEN
+// ═══════════════════════════════════════════════════════════════
+
+export async function listarDiagnosticosDeOrden(
+  ordenId: string,
+): Promise<DiagnosticoConRelaciones[]> {
+  const diagnosticos = await prisma.diagnostico.findMany({
+    where: { ordenId },
+    include: {
+      tecnico: { select: { id: true, nombre: true, apellidos: true } },
+      evidencias: { orderBy: { createdAt: 'desc' } },
+    },
+    orderBy: { createdAt: 'desc' },
+  });
+
+  return diagnosticos as DiagnosticoConRelaciones[];
+}
+
+// ═══════════════════════════════════════════════════════════════
+// ELIMINAR (solo si está en BORRADOR)
+// ═══════════════════════════════════════════════════════════════
+
+export async function eliminarDiagnostico(id: string, ctx: Ctx = {}): Promise<void> {
+  const client = ctx.tx ?? prisma;
+
+  const actual = await client.diagnostico.findFirst({
+    where: { id },
+    select: { id: true, estado: true },
+  });
+  if (!actual) {
+    throw new NotFoundError('Diagnóstico no encontrado');
+  }
+
+  if (actual.estado !== 'BORRADOR') {
+    throw new BusinessRuleError('Solo se pueden eliminar diagnósticos en estado BORRADOR');
+  }
+
+  await client.diagnostico.delete({ where: { id } });
+}
+
+
+=== src\modules\diagnosticos\services\evidencia.service.ts ===
+import type { Prisma } from '@/generated/prisma/client';
+import { prisma } from '@/shared/db/client';
+import { BusinessRuleError, NotFoundError } from '@/shared/errors';
+import { requireCurrentTenantId } from '@/shared/tenant/context';
+
+import type { CrearEvidenciaInput } from '../schemas';
+
+interface Ctx {
+  tx?: Prisma.TransactionClient;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// CREAR EVIDENCIA
+// ═══════════════════════════════════════════════════════════════
+
+export async function crearEvidencia(input: CrearEvidenciaInput, ctx: Ctx = {}) {
+  const client = ctx.tx ?? prisma;
+  const tenantId = requireCurrentTenantId();
+
+  const diagnostico = await client.diagnostico.findFirst({
+    where: { id: input.diagnosticoId },
+    select: { id: true, estado: true },
+  });
+  if (!diagnostico) {
+    throw new NotFoundError('Diagnóstico no encontrado');
+  }
+
+  if (diagnostico.estado === 'COMPLETADO') {
+    throw new BusinessRuleError('No se pueden agregar evidencias a un diagnóstico completado');
+  }
+
+  const data: Prisma.DiagnosticoEvidenciaUncheckedCreateInput = {
+    tenantId,
+    diagnosticoId: input.diagnosticoId,
+    tipo: input.tipo,
+    url: input.url,
+    descripcion: input.descripcion ?? null,
+  };
+
+  return client.diagnosticoEvidencia.create({ data });
+}
+
+// ═══════════════════════════════════════════════════════════════
+// ELIMINAR EVIDENCIA
+// ═══════════════════════════════════════════════════════════════
+
+export async function eliminarEvidencia(id: string, ctx: Ctx = {}): Promise<void> {
+  const client = ctx.tx ?? prisma;
+
+  const evidencia = await client.diagnosticoEvidencia.findFirst({
+    where: { id },
+    include: { diagnostico: { select: { estado: true } } },
+  });
+  if (!evidencia) {
+    throw new NotFoundError('Evidencia no encontrada');
+  }
+
+  if (evidencia.diagnostico.estado === 'COMPLETADO') {
+    throw new BusinessRuleError('No se pueden eliminar evidencias de un diagnóstico completado');
+  }
+
+  await client.diagnosticoEvidencia.delete({ where: { id } });
+}
+
+
+=== src\modules\diagnosticos\schemas\crear-diagnostico.schema.ts ===
+(archivo no encontrado)
+
+=== src\modules\diagnosticos\schemas\editar-diagnostico.schema.ts ===
+(archivo no encontrado)
+
+=== src\modules\diagnosticos\schemas\evidencia.schema.ts ===
+import { z } from 'zod';
+
+export const TipoEvidenciaEnum = z.enum(['FOTO', 'VIDEO', 'DOCUMENTO']);
+export type TipoEvidenciaType = z.infer<typeof TipoEvidenciaEnum>;
+
+export const CrearEvidenciaSchema = z.object({
+  diagnosticoId: z.string().min(1, 'Diagnóstico requerido'),
+  tipo: TipoEvidenciaEnum.default('FOTO'),
+  url: z
+    .url('URL inválida')
+    .max(1000, 'Máximo 1000 caracteres')
+    .refine(
+      (url) => url.startsWith('http://') || url.startsWith('https://'),
+      'La URL debe empezar con http:// o https://',
+    ),
+  descripcion: z
+    .string()
+    .trim()
+    .max(255, 'Máximo 255 caracteres')
+    .optional()
+    .or(z.literal('').transform(() => undefined)),
+});
+
+export type CrearEvidenciaInput = z.infer<typeof CrearEvidenciaSchema>;
+
+export const EliminarEvidenciaSchema = z.object({
+  id: z.string().min(1, 'ID requerido'),
+});
+
+export type EliminarEvidenciaInput = z.infer<typeof EliminarEvidenciaSchema>;
+
+
+=== src\modules\catalogos\actions\categoria\crear-categoria.action.ts ===
+'use server';
+
+import { sanitizeForAudit } from '@/shared/audit';
+import { validatedAction } from '@/shared/validation';
+
+import { CrearCategoriaSchema } from '../../schemas/categoria.schema';
+import { crearCategoria } from '../../services/categoria.service';
+
+export const crearCategoriaAction = validatedAction(
+  {
+    modulo: 'catalogos',
+    accion: 'crear-categoria',
+    schema: CrearCategoriaSchema,
+    permission: 'catalogos:categorias:crear',
+    transactional: true,
+    audit: {
+      accionAuditoria: 'CREATE',
+      tablaAfectada: 'cat_categorias_equipo',
+      registroId: (out: { id: string; nombre: string; descripcion?: string | null }) => out.id,
+      datosNuevos: (out) => sanitizeForAudit(out),
+    },
+  },
+  async (input, { tx }) => {
+    return crearCategoria(input, { tx: tx ?? undefined });
+  },
+);
+
+
+=== prisma/schema.prisma : Diagnostico / Evidencia ===
+
+> prisma\schema.prisma:20:enum AccionAuditoria {
+  prisma\schema.prisma:21:  CREATE
+  prisma\schema.prisma:22:  UPDATE
+  prisma\schema.prisma:23:  DELETE
+  prisma\schema.prisma:24:  LOGIN
+  prisma\schema.prisma:25:  LOGOUT
+  prisma\schema.prisma:26:}
+  prisma\schema.prisma:27:
+  prisma\schema.prisma:28:// ─── Diagnóstico técnico (N:1 con la orden — varios por orden) ───
+> prisma\schema.prisma:29:model Diagnostico {
+  prisma\schema.prisma:30:  id                 String            @id @default(cuid())
+  prisma\schema.prisma:31:  tenantId           String            @map("tenant_id")
+  prisma\schema.prisma:32:  ordenId            String            @map("orden_id")
+  prisma\schema.prisma:33:  tecnicoId          String            @map("tecnico_id")
+  prisma\schema.prisma:34:  estado             EstadoDiagnostico @default(BORRADOR)
+  prisma\schema.prisma:35:  pruebasRealizadas  String?           @map("pruebas_realizadas") @db.Text
+  prisma\schema.prisma:36:  voltajesMedidos    String?           @map("voltajes_medidos") @db.Text
+  prisma\schema.prisma:37:  componentesDanados String?           @map("componentes_danados") @db.Text
+  prisma\schema.prisma:38:  observaciones      String?           @db.Text
+  prisma\schema.prisma:39:  conclusion         String?           @db.Text
+  prisma\schema.prisma:40:  fechaInicio        DateTime?         @map("fecha_inicio")
+  prisma\schema.prisma:41:  fechaFin           DateTime?         @map("fecha_fin")
+  prisma\schema.prisma:42:  createdAt          DateTime          @default(now()) @map("created_at")
+  prisma\schema.prisma:43:  updatedAt          DateTime          @updatedAt @map("updated_at")
+  prisma\schema.prisma:44:
+  prisma\schema.prisma:45:  tenant     Tenant                 @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  prisma\schema.prisma:46:  orden      OrdenServicio          @relation(fields: [ordenId], references: [id], onDelete: Cascade)
+  prisma\schema.prisma:47:  tecnico    Usuario                @relation("DiagnosticoTecnico", fields: [tecnicoId], references: [id])
+  prisma\schema.prisma:48:  evidencias DiagnosticoEvidencia[]
+  prisma\schema.prisma:49:
+  prisma\schema.prisma:50:  @@index([tenantId, ordenId])
+  prisma\schema.prisma:51:  @@index([tenantId, tecnicoId, estado])
+  prisma\schema.prisma:52:  @@map("diagnosticos")
+  prisma\schema.prisma:53:}
+  prisma\schema.prisma:54:
+  prisma\schema.prisma:55:// ─── Evidencias del diagnóstico (fotos/videos por URL) ───
+> prisma\schema.prisma:56:model DiagnosticoEvidencia {
+  prisma\schema.prisma:57:  id            String        @id @default(cuid())
+  prisma\schema.prisma:58:  tenantId      String        @map("tenant_id")
+  prisma\schema.prisma:59:  diagnosticoId String        @map("diagnostico_id")
+  prisma\schema.prisma:60:  tipo          TipoEvidencia @default(FOTO)
+  prisma\schema.prisma:61:  url           String        @db.VarChar(1000)
+  prisma\schema.prisma:62:  descripcion   String?       @db.VarChar(255)
+  prisma\schema.prisma:63:  createdAt     DateTime      @default(now()) @map("created_at")
+  prisma\schema.prisma:64:
+  prisma\schema.prisma:65:  tenant      Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  prisma\schema.prisma:66:  diagnostico Diagnostico @relation(fields: [diagnosticoId], references: [id], onDelete: Cascade)
+  prisma\schema.prisma:67:
+  prisma\schema.prisma:68:  @@index([tenantId, diagnosticoId])
+  prisma\schema.prisma:69:  @@map("diagnostico_evidencias")
+  prisma\schema.prisma:70:}
+  prisma\schema.prisma:71:
+  prisma\schema.prisma:72:// ═══════════════════════════════════════════════════════════════
+  prisma\schema.prisma:73:// TENANT
+  prisma\schema.prisma:74:// ═══════════════════════════════════════════════════════════════
+  prisma\schema.prisma:75:
+  prisma\schema.prisma:76:model Tenant {
+  prisma\schema.prisma:77:  id        String   @id @default(cuid())
+  prisma\schema.prisma:78:  slug      String   @unique @db.VarChar(64)
+  prisma\schema.prisma:79:  nombre    String   @db.VarChar(255)
+  prisma\schema.prisma:80:  activo    Boolean  @default(true)
+  prisma\schema.prisma:81:  createdAt DateTime @default(now()) @map("created_at")
+  prisma\schema.prisma:82:  updatedAt DateTime @updatedAt @map("updated_at")
+  prisma\schema.prisma:83:
+  prisma\schema.prisma:84:  usuarios      Usuario[]
+  prisma\schema.prisma:85:  roles         Rol[]
+  prisma\schema.prisma:86:  sesiones      SesionLogin[]
+  prisma\schema.prisma:87:  configuracion ConfiguracionTenant[]
+  prisma\schema.prisma:88:  bitacora      BitacoraAuditoria[]
+  prisma\schema.prisma:89:
+  prisma\schema.prisma:90:  // 👇 NUEVO — Módulo Clientes y CRM
+  prisma\schema.prisma:91:  categoriasEquipo   CatCategoriaEquipo[]
+  prisma\schema.prisma:92:  marcas             CatMarca[]
+  prisma\schema.prisma:93:  clientes           Cliente[]
+  prisma\schema.prisma:94:  clienteDirecciones ClienteDireccion[]
+  prisma\schema.prisma:95:  clienteEquipos     ClienteEquipo[]
+  prisma\schema.prisma:96:  tiposServicio      CatTipoServicio[]
+> prisma\schema.prisma:257:enum TipoCliente {
+  prisma\schema.prisma:258:  FISICA
+  prisma\schema.prisma:259:  JURIDICA
+  prisma\schema.prisma:260:}
+  prisma\schema.prisma:261:
+  prisma\schema.prisma:262:// ─── Catálogo: Categorías de equipo ───
+  prisma\schema.prisma:263:model CatCategoriaEquipo {
+  prisma\schema.prisma:264:  id          String   @id @default(cuid())
+  prisma\schema.prisma:265:  tenantId    String   @map("tenant_id")
+  prisma\schema.prisma:266:  nombre      String   @db.VarChar(80)
+  prisma\schema.prisma:267:  descripcion String?  @db.VarChar(255)
+  prisma\schema.prisma:268:  esSistema   Boolean  @default(false) @map("es_sistema")
+  prisma\schema.prisma:269:  activo      Boolean  @default(true)
+  prisma\schema.prisma:270:  createdAt   DateTime @default(now()) @map("created_at")
+  prisma\schema.prisma:271:  updatedAt   DateTime @updatedAt @map("updated_at")
+  prisma\schema.prisma:272:
+  prisma\schema.prisma:273:  tenant  Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  prisma\schema.prisma:274:  equipos ClienteEquipo[]
+  prisma\schema.prisma:275:
+  prisma\schema.prisma:276:  @@unique([tenantId, nombre])
+  prisma\schema.prisma:277:  @@index([tenantId, activo])
+  prisma\schema.prisma:278:  @@map("cat_categorias_equipo")
+  prisma\schema.prisma:279:}
+  prisma\schema.prisma:280:
+  prisma\schema.prisma:281:// ─── Catálogo: Marcas ───
+  prisma\schema.prisma:282:model CatMarca {
+  prisma\schema.prisma:283:  id        String   @id @default(cuid())
+  prisma\schema.prisma:284:  tenantId  String   @map("tenant_id")
+  prisma\schema.prisma:285:  nombre    String   @db.VarChar(80)
+  prisma\schema.prisma:286:  activo    Boolean  @default(true)
+  prisma\schema.prisma:287:  createdAt DateTime @default(now()) @map("created_at")
+  prisma\schema.prisma:288:  updatedAt DateTime @updatedAt @map("updated_at")
+  prisma\schema.prisma:289:
+  prisma\schema.prisma:290:  tenant  Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  prisma\schema.prisma:291:  equipos ClienteEquipo[]
+  prisma\schema.prisma:292:
+  prisma\schema.prisma:293:  @@unique([tenantId, nombre])
+  prisma\schema.prisma:294:  @@index([tenantId, activo])
+  prisma\schema.prisma:295:  @@map("cat_marcas")
+  prisma\schema.prisma:296:}
+  prisma\schema.prisma:297:
+> prisma\schema.prisma:407:enum EstadoOrden {
+  prisma\schema.prisma:408:  BORRADOR
+  prisma\schema.prisma:409:  RECIBIDO
+  prisma\schema.prisma:410:  EN_DIAGNOSTICO
+  prisma\schema.prisma:411:  PRESUPUESTADO
+  prisma\schema.prisma:412:  APROBADO
+  prisma\schema.prisma:413:  REPARANDO
+  prisma\schema.prisma:414:  LISTO
+  prisma\schema.prisma:415:  ENTREGADO
+  prisma\schema.prisma:416:  CANCELADO
+  prisma\schema.prisma:417:}
+  prisma\schema.prisma:418:
+> prisma\schema.prisma:419:enum ModalidadOrden {
+  prisma\schema.prisma:420:  TALLER
+  prisma\schema.prisma:421:  DOMICILIO
+  prisma\schema.prisma:422:}
+  prisma\schema.prisma:423:
+> prisma\schema.prisma:424:enum PrioridadOrden {
+  prisma\schema.prisma:425:  BAJA
+  prisma\schema.prisma:426:  MEDIA
+  prisma\schema.prisma:427:  ALTA
+  prisma\schema.prisma:428:  URGENTE
+  prisma\schema.prisma:429:}
+  prisma\schema.prisma:430:
+  prisma\schema.prisma:431:// ─── Orden de Servicio ───
+  prisma\schema.prisma:432:model OrdenServicio {
+  prisma\schema.prisma:433:  id                String         @id @default(cuid())
+  prisma\schema.prisma:434:  tenantId          String         @map("tenant_id")
+  prisma\schema.prisma:435:  folio             String         @db.VarChar(30)
+  prisma\schema.prisma:436:  clienteId         String         @map("cliente_id")
+  prisma\schema.prisma:437:  equipoId          String         @map("equipo_id")
+  prisma\schema.prisma:438:  tipoServicioId    String?        @map("tipo_servicio_id")
+  prisma\schema.prisma:439:  direccionId       String?        @map("direccion_id")
+  prisma\schema.prisma:440:  tecnicoAsignadoId String?        @map("tecnico_asignado_id")
+  prisma\schema.prisma:441:  modalidad         ModalidadOrden @default(TALLER)
+  prisma\schema.prisma:442:  estado            EstadoOrden    @default(BORRADOR)
+  prisma\schema.prisma:443:  prioridad         PrioridadOrden @default(MEDIA)
+  prisma\schema.prisma:444:  fallaReportada    String?        @map("falla_reportada") @db.Text
+  prisma\schema.prisma:445:  observaciones     String?        @db.Text
+  prisma\schema.prisma:446:  fechaRecepcion    DateTime?      @map("fecha_recepcion")
+  prisma\schema.prisma:447:  fechaCompromiso   DateTime?      @map("fecha_compromiso")
+  prisma\schema.prisma:448:  fechaEntrega      DateTime?      @map("fecha_entrega")
+  prisma\schema.prisma:449:  createdAt         DateTime       @default(now()) @map("created_at")
+  prisma\schema.prisma:450:  updatedAt         DateTime       @updatedAt @map("updated_at")
+  prisma\schema.prisma:451:
+  prisma\schema.prisma:452:  tenant            Tenant                  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  prisma\schema.prisma:453:  cliente           Cliente                 @relation(fields: [clienteId], references: [id])
+  prisma\schema.prisma:454:  equipo            ClienteEquipo           @relation(fields: [equipoId], references: [id])
+  prisma\schema.prisma:455:  tipoServicio      CatTipoServicio?        @relation(fields: [tipoServicioId], references: [id], onDelete: SetNull)
+  prisma\schema.prisma:456:  direccion         ClienteDireccion?       @relation(fields: [direccionId], references: [id], onDelete: SetNull)
+  prisma\schema.prisma:457:  tecnicoAsignado   Usuario?                @relation("OrdenTecnico", fields: [tecnicoAsignadoId], references: [id], onDelete: SetNull)
+  prisma\schema.prisma:458:  historialEstados  OrdenEstadoHistorial[]
+  prisma\schema.prisma:459:  checklistEstetico OrdenChecklistEstetico?
+  prisma\schema.prisma:460:  accesorios        OrdenAccesorio[]
+  prisma\schema.prisma:461:
+  prisma\schema.prisma:462:  diagnosticos Diagnostico[]
+  prisma\schema.prisma:463:
+  prisma\schema.prisma:464:  @@unique([tenantId, folio])
+> prisma\schema.prisma:533:enum EstadoDiagnostico {
+  prisma\schema.prisma:534:  BORRADOR
+  prisma\schema.prisma:535:  EN_PROCESO
+  prisma\schema.prisma:536:  COMPLETADO
+  prisma\schema.prisma:537:}
+  prisma\schema.prisma:538:
+> prisma\schema.prisma:539:enum TipoEvidencia {
+  prisma\schema.prisma:540:  FOTO
+  prisma\schema.prisma:541:  VIDEO
+  prisma\schema.prisma:542:  DOCUMENTO
+  prisma\schema.prisma:543:}
+
+
+=== permisos diagnosticos ===
+
+  prisma\seed\data\permisos.ts:27:  { codigo: 'ordenes:exportar', modulo: 'ordenes', descripcion: 'Exportar órdenes' },
+  prisma\seed\data\permisos.ts:28:
+  prisma\seed\data\permisos.ts:29:  // ─── Diagnóstico ───
+> prisma\seed\data\permisos.ts:30:  { codigo: 'diagnosticos:ver', modulo: 'diagnosticos', descripcion: 'Ver diagnósticos' },
+> prisma\seed\data\permisos.ts:31:  { codigo: 'diagnosticos:crear', modulo: 'diagnosticos', descripcion: 'Crear diagnósticos' },
+> prisma\seed\data\permisos.ts:32:  { codigo: 'diagnosticos:editar', modulo: 'diagnosticos', descripcion: 'Editar diagnósticos' },
+  prisma\seed\data\permisos.ts:33:
+  prisma\seed\data\permisos.ts:34:  // ─── Presupuestos ───
+  prisma\seed\data\permisos.ts:35:  { codigo: 'presupuestos:ver', modulo: 'presupuestos', descripcion: 'Ver presupuestos' },
+  prisma\seed\data\permisos.ts:161:  { codigo: 'ordenes:exportar', modulo: 'ordenes', descripcion: 'Exportar órdenes' },
+  prisma\seed\data\permisos.ts:162:
+  prisma\seed\data\permisos.ts:163:  // ─── Diagnósticos técnicos ───
+> prisma\seed\data\permisos.ts:164:  { codigo: 'diagnosticos:ver', modulo: 'diagnosticos', descripcion: 'Ver diagnósticos' },
+> prisma\seed\data\permisos.ts:165:  { codigo: 'diagnosticos:crear', modulo: 'diagnosticos', descripcion: 'Crear diagnósticos' },
+  prisma\seed\data\permisos.ts:166:  {
+> prisma\seed\data\permisos.ts:167:    codigo: 'diagnosticos:editar',
+> prisma\seed\data\permisos.ts:168:    modulo: 'diagnosticos',
+  prisma\seed\data\permisos.ts:169:    descripcion: 'Editar diagnósticos',
+  prisma\seed\data\permisos.ts:170:  },
+  prisma\seed\data\permisos.ts:171:  {
+> prisma\seed\data\permisos.ts:172:    codigo: 'diagnosticos:completar',
+> prisma\seed\data\permisos.ts:173:    modulo: 'diagnosticos',
+  prisma\seed\data\permisos.ts:174:    descripcion: 'Completar diagnósticos',
+  prisma\seed\data\permisos.ts:175:  },
+  prisma\seed\data\permisos.ts:176:  {
+> prisma\seed\data\permisos.ts:177:    codigo: 'diagnosticos:eliminar',
+> prisma\seed\data\permisos.ts:178:    modulo: 'diagnosticos',
+  prisma\seed\data\permisos.ts:179:    descripcion: 'Eliminar diagnósticos',
+  prisma\seed\data\permisos.ts:180:  },
+  prisma\seed\data\permisos.ts:181:];
+

@@ -1,0 +1,56 @@
+services:
+  mysql:
+    image: mysql:8.4
+    container_name: gestion_servicio_web_mysql
+    restart: unless-stopped
+    ports:
+      - '3307:3306'
+    environment:
+      MYSQL_ROOT_PASSWORD: RootLocal2026!
+      MYSQL_DATABASE: gestion_servicio_web
+      MYSQL_CHARSET: utf8mb4
+      MYSQL_COLLATION: utf8mb4_0900_ai_ci
+      TZ: America/Managua
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      - --default-storage-engine=InnoDB
+      - --innodb-buffer-pool-size=512M
+      - --max-connections=200
+      - --max-allowed-packet=64M
+      - --sql-mode=STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION
+      - --default-time-zone=-06:00
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ['CMD', 'mysqladmin', 'ping', '-h', 'localhost', '-uroot', '-pRootLocal2026!']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - gestion_net
+
+  adminer:
+    image: adminer:latest
+    container_name: gestion_servicio_web_adminer
+    restart: unless-stopped
+    ports:
+      - '8080:8080'
+    environment:
+      ADMINER_DEFAULT_SERVER: mysql
+      ADMINER_DESIGN: nette
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - gestion_net
+
+volumes:
+  mysql_data:
+    name: gestion_servicio_web_mysql_data
+
+networks:
+  gestion_net:
+    name: gestion_servicio_web_net

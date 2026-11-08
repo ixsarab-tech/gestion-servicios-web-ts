@@ -1,0 +1,49 @@
+# Dependencias
+node_modules/
+
+# Build de Next.js
+.next/
+out/
+build/
+dist/
+
+# Lockfiles
+pnpm-lock.yaml
+package-lock.json
+yarn.lock
+
+# Generados
+next-env.d.ts
+*.tsbuildinfo
+
+# Base de datos / dumps
+backups/
+*.sql
+
+# Prisma (se formatea vía prisma format)
+prisma/migrations/
+prisma/sql/generated_schema.sql
+
+# Prisma generated client
+.prisma/
+
+# Cobertura / tests
+coverage/
+playwright-report/
+test-results/
+
+# Entorno
+.env
+.env.local
+.env.test
+.env*.local
+
+# Sistema
+.DS_Store
+Thumbs.db
+
+# Documentación que no queremos tocar
+AGENTS.md
+CHANGELOG.md
+# Prisma generated client
+src/generated/

@@ -1,0 +1,9 @@
+export { CategoriaForm } from './categoria-form';
+export { CategoriaFormEdit } from './categoria-form-edit';
+export { CategoriaTable } from './categoria-table';
+export { MarcaForm } from './marca-form';
+export { MarcaFormEdit } from './marca-form-edit';
+export { MarcaTable } from './marca-table';
+export { TipoServicioForm } from './tipo-servicio-form';
+export { TipoServicioFormEdit } from './tipo-servicio-form-edit';
+export { TipoServicioTable } from './tipo-servicio-table';
