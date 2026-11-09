@@ -1,8 +1,7 @@
-import Link from 'next/link';
 import { connection } from 'next/server';
-import { Plus, Users } from 'lucide-react';
+import { Users } from 'lucide-react';
 
-import { Button } from '@/components/ui/button';
+import { NuevoUsuarioButton } from '@/modules/usuarios-seguridad/components';
 import { UsuarioTable } from '@/modules/usuarios-seguridad/components/usuario-table';
 import { FiltrosUsuarioSchema } from '@/modules/usuarios-seguridad/schemas';
 import { listarRoles, listarUsuarios } from '@/modules/usuarios-seguridad/services';
@@ -27,6 +26,11 @@ export default async function UsuariosPage({ searchParams }: PageProps) {
   );
 
   const puedeCrear = user.permisos.includes('usuarios:crear');
+  const rolesMini = roles.map((r) => ({
+    id: r.id,
+    nombre: r.nombre,
+    descripcion: r.descripcion,
+  }));
 
   return (
     <div className="space-y-6">
@@ -39,14 +43,7 @@ export default async function UsuariosPage({ searchParams }: PageProps) {
             {result.total} {result.total === 1 ? 'usuario' : 'usuarios'} registrados
           </p>
         </div>
-        {puedeCrear && (
-          <Button asChild>
-            <Link href="/usuarios/nuevo">
-              <Plus className="mr-2 h-4 w-4" />
-              Nuevo usuario
-            </Link>
-          </Button>
-        )}
+        {puedeCrear && <NuevoUsuarioButton roles={rolesMini} />}
       </div>
 
       <UsuarioTable
@@ -64,12 +61,6 @@ export default async function UsuariosPage({ searchParams }: PageProps) {
           },
         }}
       />
-
-      {roles.length > 0 && (
-        <p className="text-muted-foreground text-xs">
-          Roles disponibles: {roles.map((r) => r.nombre).join(', ')}
-        </p>
-      )}
     </div>
   );
 }
