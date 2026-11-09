@@ -86,12 +86,12 @@ export function RepuestoFormDialog({
         : await agregarRepuestoAction(data);
 
       if (!result.success) {
-        toast.error(esEdicion ? 'Error al actualizar repuesto' : 'Error al agregar repuesto', {
+        toast.error(esEdicion ? 'Error al actualizar ítem' : 'Error al agregar ítem', {
           description: result.error,
         });
         return;
       }
-      toast.success(esEdicion ? 'Repuesto actualizado' : 'Repuesto agregado');
+      toast.success(esEdicion ? 'Ítem actualizado' : 'Ítem agregado');
       onOpenChange(false);
       router.refresh();
       onSuccess?.();
@@ -102,11 +102,11 @@ export function RepuestoFormDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>{esEdicion ? 'Editar repuesto' : 'Agregar repuesto'}</DialogTitle>
+          <DialogTitle>{esEdicion ? 'Editar ítem' : 'Agregar ítem'}</DialogTitle>
           <DialogDescription>
             {esEdicion
-              ? 'Modifica los datos del repuesto.'
-              : 'Registra un repuesto usado en esta reparación.'}
+              ? 'Modifica los datos del ítem.'
+              : 'Registra un repuesto o servicio usado en esta reparación.'}
           </DialogDescription>
         </DialogHeader>
         <Form {...form}>
@@ -116,9 +116,9 @@ export function RepuestoFormDialog({
               name="nombre"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Nombre *</FormLabel>
+                  <FormLabel>Concepto *</FormLabel>
                   <FormControl>
-                    <Input placeholder="Ej: Capacitor 470µF 25V" {...field} />
+                    <Input placeholder="Ej: Capacitor 470µF 25V o Mano de obra" {...field} />
                   </FormControl>
                   <FormMessage />
                 </FormItem>
@@ -180,4 +180,5 @@ export function RepuestoFormDialog({
     </Dialog>
   );
 }
+
 

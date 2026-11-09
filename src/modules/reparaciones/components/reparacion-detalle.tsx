@@ -95,14 +95,14 @@ export function ReparacionDetalle({
   }
 
   function handleEliminarRepuesto(id: string) {
-    if (!window.confirm('¿Eliminar este repuesto?')) return;
+    if (!window.confirm('¿Eliminar este ítem?')) return;
     startTransition(async () => {
       const result = await eliminarRepuestoAction({ id });
       if (!result.success) {
         toast.error('No se pudo eliminar', { description: result.error });
         return;
       }
-      toast.success('Repuesto eliminado');
+      toast.success('Ítem eliminado');
       router.refresh();
     });
   }
@@ -183,18 +183,18 @@ export function ReparacionDetalle({
           <div>
             <div className="mb-2 flex items-center justify-between">
               <p className="text-muted-foreground text-xs font-medium uppercase">
-                Repuestos ({reparacion.repuestos.length})
+                Ítems ({reparacion.repuestos.length})
               </p>
               {!completada && puedeEditar && (
                 <Button size="sm" variant="outline" onClick={() => setAddRepuestoOpen(true)}>
-                  <Plus className="mr-1 h-3 w-3" /> Agregar repuesto
+                  <Plus className="mr-1 h-3 w-3" /> Agregar ítem
                 </Button>
               )}
             </div>
 
             {reparacion.repuestos.length === 0 ? (
               <p className="text-muted-foreground rounded-md border border-dashed p-4 text-center text-sm">
-                Sin repuestos registrados.
+                Sin ítems registrados.
               </p>
             ) : (
               <div className="rounded-md border">
@@ -231,7 +231,7 @@ export function ReparacionDetalle({
                               variant="ghost"
                               className="h-8 w-8"
                               onClick={() => setEditingRepuesto(rep)}
-                              aria-label="Editar repuesto"
+                              aria-label="Editar ítem"
                             >
                               <Pencil className="h-3 w-3" />
                             </Button>
@@ -241,7 +241,7 @@ export function ReparacionDetalle({
                               className="h-8 w-8"
                               onClick={() => handleEliminarRepuesto(rep.id)}
                               disabled={isPending}
-                              aria-label="Eliminar repuesto"
+                              aria-label="Eliminar ítem"
                             >
                               <Trash2 className="h-3 w-3" />
                             </Button>
@@ -294,3 +294,4 @@ export function ReparacionDetalle({
     </Card>
   );
 }
+
