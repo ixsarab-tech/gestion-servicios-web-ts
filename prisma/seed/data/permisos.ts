@@ -50,6 +50,26 @@ export const PERMISOS: PermisoSeed[] = [
     descripcion: 'Registrar tiempos',
   },
   {
+    codigo: 'reparaciones:editar',
+    modulo: 'reparaciones',
+    descripcion: 'Editar reparaciones',
+  },
+  {
+    codigo: 'reparaciones:completar',
+    modulo: 'reparaciones',
+    descripcion: 'Marcar reparación como completada',
+  },
+  {
+    codigo: 'reparaciones:bloquear',
+    modulo: 'reparaciones',
+    descripcion: 'Marcar reparación como bloqueada',
+  },
+  {
+    codigo: 'reparaciones:eliminar',
+    modulo: 'reparaciones',
+    descripcion: 'Eliminar reparaciones en borrador',
+  },
+  {
     codigo: 'reparaciones:agregar_nota',
     modulo: 'reparaciones',
     descripcion: 'Añadir notas técnicas',
@@ -181,4 +201,5 @@ export const PERMISOS: PermisoSeed[] = [
     descripcion: 'Eliminar diagnósticos',
   },
 ];
+
 

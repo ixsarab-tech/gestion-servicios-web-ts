@@ -52,6 +52,7 @@ export const ROLES_POR_TENANT: RolSeed[] = [
       'ordenes:asignar',
       'ordenes:cambiar_estado',
       'diagnosticos:ver',
+      'reparaciones:ver',
     ],
   },
   {
@@ -66,6 +67,10 @@ export const ROLES_POR_TENANT: RolSeed[] = [
       'diagnosticos:editar',
       'presupuestos:ver',
       'reparaciones:ver',
+      'reparaciones:crear',
+      'reparaciones:editar',
+      'reparaciones:completar',
+      'reparaciones:bloquear',
       'reparaciones:actualizar_tiempo',
       'reparaciones:agregar_nota',
       'inventario:ver',
@@ -91,6 +96,10 @@ export const ROLES_POR_TENANT: RolSeed[] = [
       'diagnosticos:ver',
       'diagnosticos:crear',
       'reparaciones:ver',
+      'reparaciones:crear',
+      'reparaciones:editar',
+      'reparaciones:completar',
+      'reparaciones:bloquear',
       'reparaciones:actualizar_tiempo',
       'reparaciones:agregar_nota',
       'inventario:ver',
@@ -146,5 +155,7 @@ export const ROL_SUPER_ADMIN: RolSeed = {
   esSistema: true,
   permisos: TODOS,
 };
+
+
 
 
