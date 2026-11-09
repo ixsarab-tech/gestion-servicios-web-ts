@@ -67,3 +67,7 @@ desktop.ini
 .eslintcache
 # Prisma generated client
 /src/generated/
+
+# ─── Temporales ───
+*.bak
+*.tar.gz
