@@ -17,7 +17,7 @@ export const cambiarPasswordAction = validatedAction(
       accionAuditoria: 'UPDATE',
       tablaAfectada: 'usuarios',
       registroId: (out: { id: string }) => out.id,
-      datosNuevos: () => sanitizeForAudit({ passwordChanged: true }),
+      datosNuevos: () => sanitizeForAudit({ changed: true }),
     },
   },
   async (input, { tx }): Promise<{ id: string }> => {
@@ -25,3 +25,5 @@ export const cambiarPasswordAction = validatedAction(
     return { id: input.id };
   },
 );
+
+
