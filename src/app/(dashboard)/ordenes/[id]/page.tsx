@@ -10,6 +10,8 @@ import { DiagnosticosSeccion } from '@/modules/diagnosticos/components';
 import { listarDiagnosticosDeOrden } from '@/modules/diagnosticos/services';
 import { CambiarEstadoDialog, OrdenDetalle, OrdenTimeline } from '@/modules/ordenes/components';
 import { obtenerOrden } from '@/modules/ordenes/services';
+import { ReparacionesSeccion } from '@/modules/reparaciones/components';
+import { listarReparacionesDeOrden } from '@/modules/reparaciones/services';
 import { requirePermission } from '@/shared/auth';
 import { runAsTenant } from '@/shared/tenant/context';
 
@@ -27,10 +29,13 @@ export default async function OrdenDetallePage({ params }: PageProps) {
   const orden = await runAsTenant(user, () => obtenerOrden(id));
   if (!orden) notFound();
 
-  const [diagnosticos, cotizaciones] = await Promise.all([
+  const [diagnosticos, cotizaciones, reparaciones] = await Promise.all([
     runAsTenant(user, () => listarDiagnosticosDeOrden(id)),
     runAsTenant(user, () => listarCotizacionesDeOrden(id)),
+    runAsTenant(user, () => listarReparacionesDeOrden(id)),
   ]);
+
+  const reparacion = reparaciones[0] ?? null;
 
   const puedeCambiarEstado = user.permisos.includes('ordenes:cambiar_estado');
 
@@ -71,6 +76,17 @@ export default async function OrdenDetallePage({ params }: PageProps) {
         puedeAprobar={user.permisos.includes('presupuestos:aprobar')}
         puedeRechazar={user.permisos.includes('presupuestos:rechazar')}
         puedeEliminar={user.permisos.includes('presupuestos:eliminar')}
+      />
+
+      <ReparacionesSeccion
+        ordenId={orden.id}
+        ordenEstado={orden.estado}
+        reparacion={reparacion}
+        puedeCrear={user.permisos.includes('reparaciones:crear')}
+        puedeEditar={user.permisos.includes('reparaciones:editar')}
+        puedeCompletar={user.permisos.includes('reparaciones:completar')}
+        puedeBloquear={user.permisos.includes('reparaciones:bloquear')}
+        puedeEliminar={user.permisos.includes('reparaciones:eliminar')}
       />
 
       <OrdenTimeline historial={orden.historialEstados} />
