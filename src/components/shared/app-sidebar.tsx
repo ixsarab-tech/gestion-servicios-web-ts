@@ -2,7 +2,17 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { Building2, ClipboardList, FileText, FolderTree, LayoutDashboard, Package, Users, Wrench } from 'lucide-react';
+import {
+  Building2,
+  ClipboardList,
+  FileText,
+  FolderTree,
+  LayoutDashboard,
+  Package,
+  UserCog,
+  Users,
+  Wrench,
+} from 'lucide-react';
 
 import { cn } from '@/lib/utils';
 
@@ -17,8 +27,9 @@ interface MenuItem {
 const MENU_ITEMS: MenuItem[] = [
   { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { href: '/clientes', label: 'Clientes', icon: Users, permission: 'clientes:ver' },
+  { href: '/usuarios', label: 'Usuarios', icon: UserCog, permission: 'usuarios:ver' },
   {
-    href: '/catalogos', // ← ✅ antes '/catalogos/marcas'
+    href: '/catalogos',
     label: 'Catálogos',
     icon: FolderTree,
     permission: 'catalogos:marcas:ver',
